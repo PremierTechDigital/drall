@@ -89,6 +89,11 @@ abstract class BaseExecCommand extends BaseCommand {
     $this->ignoreValidationErrors();
   }
 
+  protected function doPassthru(string $command): int {
+    passthru($command, $exitCode);
+    return $exitCode;
+  }
+
   protected function doExecute(
     RawCommand $command,
     InputInterface $input,
@@ -134,33 +139,48 @@ abstract class BaseExecCommand extends BaseCommand {
 
     $logger = $this->logger;
     $hasErrors = FALSE;
-    Loop::run(function () use ($command, $placeholder, $values, $w, $output, $logger, &$hasErrors) {
-      // Removing the following line results in a segmentation fault.
-      $logger;
 
-      yield ConcurrentIterator\each(
-        Iterator\fromIterable($values),
-        new LocalSemaphore($w),
-        function ($value) use ($command, $placeholder, $output, $logger, &$hasErrors) {
-          $sCommand = $command->with([$placeholder => $value]);
-          $process = new Process($sCommand);
-
-          $output->writeln("Current site: $value");
-
-          yield $process->start();
-          $logger->debug("Running: $command");
-
-          $sOutput = yield ByteStream\buffer($process->getStdout());
-          $exitCode = yield $process->join();
-
-          if ($exitCode !== 0) {
-            $hasErrors = TRUE;
-          }
-
-          $output->write($sOutput);
+    if ($w == 1) {
+      // Skipping the AmpPHP Loop to investiguate an issue with remote aliases
+      foreach ($values as $value) {
+        $sCommand = $command->with([$placeholder => $value]);
+        $output->writeln("Current site: $value");
+        $this->logger->debug("Running: $sCommand");
+        $exitCode = $this->doPassthru($sCommand);
+        if ($exitCode !== 0) {
+          $hasErrors = TRUE;
         }
-      );
-    });
+      }
+    } 
+    else {
+      Loop::run(function () use ($command, $placeholder, $values, $w, $output, $logger, &$hasErrors) {
+        // Removing the following line results in a segmentation fault.
+        $logger;
+  
+        yield ConcurrentIterator\each(
+          Iterator\fromIterable($values),
+          new LocalSemaphore($w),
+          function ($value) use ($command, $placeholder, $output, $logger, &$hasErrors) {
+            $sCommand = $command->with([$placeholder => $value]);
+            $process = new Process($sCommand);
+  
+            $output->writeln("Current site: $value");
+  
+            yield $process->start();
+            $logger->debug("Running: $command");
+  
+            $sOutput = yield ByteStream\buffer($process->getStdout());
+            $exitCode = yield $process->join();
+  
+            if ($exitCode !== 0) {
+              $hasErrors = TRUE;
+            }
+  
+            $output->write($sOutput);
+          }
+        );
+      });
+    }
 
     $output->writeln('');
     return $hasErrors ? 1 : 0;
